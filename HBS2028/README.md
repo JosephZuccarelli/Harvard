@@ -1,4 +1,4 @@
 # HBS2028: Leading with People Analytics
 
 ##### -<ins>Course Description</ins>: Leading with People Analytics is an MBA course designed to help students learn how to analyze data to improve employee-related decisions and practices. Effective leaders must understand how data can be used (and misused) to leverage people’s skills, talents, and insights. This premise is at the heart of the rapidly evolving field of people analytics, which organizations are embracing as they use data to inform every aspect of employee life.
-##### -<ins>Project</ins>: 
+##### -<ins>Project</ins>: The course project is your opportunity to explore a topic of your academic or personal interest. You will work in groups of 2-4 students. The project must be an applied data analysis of your choosing. The project is supposed to be interesting for you: choose a topic you like! The final deliverable of the project will be a paper (5-8 pages of text, if single-spaced), which you will hand in during reading period.
