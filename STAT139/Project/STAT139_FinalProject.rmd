@@ -1,0 +1,280 @@
+---
+title: "Project Markdown: Sports Bet like a Hedge Fund Manager"
+author: "Nico Manzonelli, Jeffrey Mayolo, Joseph Zuccarelli, Simon Lam"
+date:
+output: pdf_document
+---
+
+## Load Packages
+
+```{r,eval=T, warning=F, message=F, results='hide'}
+# Import necessary libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(C50)
+library(randomForest)
+```
+
+## Read in the data
+
+```{r eval=T, message=FALSE, warning=FALSE}
+#Read in the data and do some preliminary cleaning to merge the two df
+nfl <- read.csv('nfl_odds.csv')
+ncaa <- read.csv('ncaa_odds.csv')
+
+ncaa <- ncaa %>%
+  select(-home_plays, -away_plays) %>%
+  na.omit()
+ncaa <- ncaa[,2:length(ncaa)]
+
+nfl['nfl'] <- 1
+ncaa['nfl'] <- 0
+
+all_games <- rbind(ncaa, select(nfl, -X))
+
+#Extract the median odds for all bookmakers
+# Make a column for underdog
+# Make a column for home money multiplier at start and half
+# Make column for change in money multiplier
+# Impute NAs with mean
+# Double check there are no more NAs
+medians <- all_games %>%
+  select(-bookmaker) %>%
+  group_by(home_team, away_team, date) %>%
+  summarise_all(median, na.rm = T) %>%
+  mutate(home_underdog = ifelse(home_odds_start > away_odds_start, 1, 0)) %>%
+  mutate(home_mul_start = ifelse(home_odds_start > 0, home_odds_start / 100, 100 / abs(home_odds_start))) %>%
+  mutate(home_mul_half = ifelse(home_odds_half > 0, home_odds_half / 100, 100 / abs(home_odds_half))) %>%
+  mutate(change_in_mul = home_mul_start - home_mul_half) %>%
+  mutate(point_diff_half = home_score_half - away_score_half) %>%
+  mutate(home_pen = ifelse(is.na(home_pen), mean(all_games$home_pen, na.rm = T), home_pen)) %>%
+  mutate(away_pen = ifelse(is.na(away_pen), mean(all_games$away_pen, na.rm = T), away_pen)) %>%
+  na.omit()
+
+
+shoped_odds <- all_games %>% 
+  select(-bookmaker) %>%
+  group_by(home_team, away_team, date) %>%
+  summarise_all(max, na.rm = T) %>%
+  mutate(home_underdog = ifelse(home_odds_start > away_odds_start, 1, 0)) %>%
+  mutate(home_mul_start = ifelse(home_odds_start > 0, home_odds_start / 100, 100 / abs(home_odds_start))) %>%
+  mutate(home_mul_half = ifelse(home_odds_half > 0, home_odds_half / 100, 100 / abs(home_odds_half))) %>%
+  mutate(change_in_mul = home_mul_start - home_mul_half) %>%
+  mutate(point_diff_half = home_score_half - away_score_half) %>%
+  mutate(home_pen = ifelse(is.infinite(home_pen), mean(all_games$home_pen, na.rm = T), home_pen)) %>%
+  mutate(away_pen = ifelse(is.infinite(away_pen), mean(all_games$away_pen, na.rm = T), away_pen)) %>%
+  na.omit()
+
+
+```
+#EDA
+
+```{r, eval=T, warning=F, message=F}
+# Histogram: Change in Home Team Odds (Initial - Halftime)
+medians %>%
+  ggplot(aes(change_in_mul)) +
+  geom_histogram(bins = 30) +
+  labs(x = "Home Team Change in MM (Start - Half)", y = "Count", 
+       title = "Histogram: Home Team Change in Money Multiplier (Start - Half)") +
+  theme_minimal()
+```
+
+Finally, let's explore the relationship between the response variable, the home team's change in odds at halftime, and one of our predictors, the score differential at halftime (home score - away score). Notice that there appears to be a positive linear association between the home team's change in odds at halftime and the score differential at halftime.
+
+```{r eval=F, message=FALSE, warning=FALSE}
+# Plot: Home Team Change in Odds (Start-Half) vs. Halftime Score Differential
+medians %>%
+  ggplot(aes(x=point_diff_half, y=change_in_mul, color = as.factor(nfl))) + 
+  geom_point() + 
+  geom_smooth(method = 'lm') +
+  xlab("Halftime Score Differential (Home - Away)") +
+  ylab("Halftime Change in Money Multiplier (Start - Half)") +
+  ggtitle("Home Team Change in Money Multiplier vs. Score Differential (Halftime)") +
+  labs(color = "Game") +
+  scale_color_discrete(c("NCAAF", "NFL")) +
+  theme_minimal()
+  
+```
+
+# Preliminary Model
+
+```{r,eval=T}
+# Base Model (home_odds_change ~ score_differential_half)
+baseModel <- lm(change_in_mul ~ point_diff_half * home_underdog + nfl*point_diff_half, data = medians)
+summary(baseModel)
+plot(baseModel, which = c(1,2))
+```
+```{r,eval=T}
+# Weighted Model (home_odds_change ~ score_differential_half)
+weightedModel <- lm(change_in_mul ~ point_diff_half * home_underdog + nfl*point_diff_half, 
+                weights = point_diff_half^2, data = medians)
+summary(weightedModel)
+plot(weightedModel, which = c(1,2))
+```
+
+```{r,eval=T}
+# Ploy Model (home_odds_change ~ score_differential_half)
+ployModel <- lm(change_in_mul ~ poly(point_diff_half, 2, raw = T), data = medians)
+summary(ployModel)
+plot(ployModel, which = c(1,2))
+```
+
+## Confounders? Multi-Regression
+
+```{r,eval=T, out.height=.5}
+#make every game statistic a difference term
+multi <- medians %>%
+  ungroup() %>%
+  mutate(yards_diff = home_yards - away_yards) %>%
+  mutate(first_down_diff = home_first_downs - away_first_downs) %>%
+  mutate(fumbles_diff = home_fumbles - away_fumbles) %>%
+  mutate(sacks_diff = home_sacks - away_sacks) %>%
+  mutate(ints_diff = home_ints - away_ints) %>%
+  mutate(penalty_diff = home_pen - away_pen)
+
+#define the multi model with poly
+multiModel <- lm(change_in_mul ~ (poly(point_diff_half, 2, raw = T) + yards_diff + first_down_diff + fumbles_diff + sacks_diff + ints_diff + penalty_diff), data = multi)
+
+summary(multiModel)
+plot(multiModel, which = c(1,2))
+```
+
+## Prediction Modeling
+
+Train-Test Split
+
+```{r}
+###SPLIT TEST AND TRAIN#########
+set.seed(139)
+train_idx <- sample(1:nrow(medians), 88)
+train <- medians[train_idx,]
+test <- medians[-train_idx,]
+
+X_train <- train %>%
+  ungroup() %>%
+  select(point_diff_half , home_yards, away_yards,
+         home_first_downs, away_first_downs, home_fumbles, away_fumbles,
+         home_sacks, away_sacks, home_ints, away_ints, home_pen, away_pen, 
+         espn_win_pred, home_underdog, nfl)
+y_train <- as.factor(train$home_win)
+
+X_test <- test %>%
+  ungroup() %>%
+  select(point_diff_half , home_yards, away_yards,
+         home_first_downs, away_first_downs, home_fumbles, away_fumbles,
+         home_sacks, away_sacks, home_ints, away_ints, home_pen, away_pen, 
+         espn_win_pred, home_underdog, nfl)
+y_test <- as.factor(test$home_win)
+```
+
+Fit a single tree
+
+```{r}
+######FIT A SINGLE DECISION TREE########
+tree <- C5.0(x = X_train, y = y_train)
+
+plot(tree)
+
+#training accuracy
+sum(predict(tree, X_train) == y_train) / nrow(X_train)
+#testing accuracy
+sum(predict(tree, X_test) == y_test) / nrow(X_test)
+
+```
+
+Fit a Random Forest
+
+```{r}
+####FIT A WELL TUNED RANDOM FOREST######
+grid = expand.grid(maxnodes = c(6,12,25,50,75,100), mtrys = c(4, 6, 12,16))
+val_scores <- rep(NA, nrow(grid))
+X_train["home_win"] = y_train
+
+#cross validate
+for (i in 1:nrow(grid)) {
+  rf <- randomForest(home_win ~ ., data = X_train, 
+                     maxnodes= grid[i,1], mtry = grid[i,2], ntree = 300)
+  val_scores[i] <- sum(rf$predicted == X_train$home_win, na.rm = T) / length(na.omit(rf$predicted))
+}
+
+#extract best hyperparamters for tuning
+best_grid <- which(val_scores == min(val_scores))
+
+#recreate best model
+rf <- randomForest(home_win ~., data = X_train,
+                    maxnodes= grid[best_grid, 1], mtry = grid[best_grid, 2], ntree = 300)
+
+#extract variable importance
+variable_importance <- data.frame(MeanDecreaseGini = rf$importance[], Variable = names(rf$importance[,1]))
+
+ggplot(variable_importance) +
+  geom_bar(aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini), 
+           stat = 'identity', alpha = .8) +
+  coord_flip() +
+  ylab("Mean Decrease In Gini Index At Each Split") +
+  xlab("Variable") +
+  ggtitle("Random Forest Variable Importance") +
+  theme_minimal()
+
+
+#training accuracy
+sum(predict(rf, X_train) == y_train) / nrow(X_train)
+
+#testing accuracy
+sum(predict(rf, X_test) == y_test) / nrow(X_test)
+```
+
+
+## Profit Simulatuion
+
+```{r}
+#Imagine 1000 different bettors betting on the same week. 
+#This simulation gets the difference in money made for each better if they followed our
+#strategy or threw or decided not to hedge
+
+simulate_profit_difference <- function(sim_test, model) {
+  
+  sim_test["model_prediction"] <- predict(model, sim_test)
+  profit_diff <- c()
+  
+  for (i in 1:1000) {
+  informed_stuff <- sim_test %>%
+    mutate(underdog_win = ifelse(home_underdog == home_win, 1, 0)) %>%
+    mutate(bet_underdog = sample(0:1, 1, prob = c(.5, .5))) %>%
+    mutate(pred_underdog_win = ifelse(model_prediction == home_underdog, 1,0)) %>%
+    mutate(hedge = ifelse(pred_underdog_win == bet_underdog, 0, 1)) %>%
+    mutate(init_odds = ifelse(home_underdog == bet_underdog, home_odds_start, away_odds_start)) %>%
+    mutate(init_mul = ifelse(init_odds > 0, init_odds / 100, 100 / abs(init_odds))) %>%
+    mutate(init_win = ifelse(bet_underdog == underdog_win, 1, 0)) %>%
+    mutate(init_wins_prof = ifelse(init_win == 1, 100*init_mul, -100)) %>%
+    mutate(hedge_odds_half = ifelse(home_underdog == 1, away_odds_half, home_odds_half)) %>%
+    mutate(hedge_mul = ifelse(hedge_odds_half > 0, hedge_odds_half / 100, 100 / abs(hedge_odds_half))) %>%
+    mutate(hedge_amount = (100*init_mul + 100) / (hedge_mul + 1)) %>%
+    mutate(if_hedge_wins_prof = hedge_amount * hedge_mul) %>%
+    mutate(if_hedge_prof = ifelse(init_win == 1, init_wins_prof - hedge_amount, if_hedge_wins_prof - 100)) %>%
+    mutate(total_profit = ifelse(hedge == 1, if_hedge_prof, init_wins_prof))
+  
+    profit_diff[i] <- sum(informed_stuff$total_profit) - sum(informed_stuff$init_wins_prof)
+  }
+  return(profit_diff)
+}
+
+sim_test <- test 
+tree_profit_diff <- simulate_profit_difference(sim_test, tree)
+rf_profit_diff <- simulate_profit_difference(sim_test, rf)
+
+profits <- rbind(data.frame(profit = tree_profit_diff, Model = "Single Tree"),
+                 data.frame(profit = rf_profit_diff, Model = "Random Forest"))
+
+ggplot(profits) +
+  geom_histogram(aes(profit, fill = Model), alpha = .7) +
+  ggtitle("Distribution of Difference in Profits") +
+  xlab("Difference in Profits (Model Recommended Hedge - No Hedge)") +
+  ylab("Frequency") +
+  theme_minimal()
+
+
+summary(tree_profit_diff)
+summary(rf_profit_diff)
+```
